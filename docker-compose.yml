@@ -1,0 +1,72 @@
+# Satellite fixed-priority telemetry bus analysis stack.
+#
+#   docker compose up --build                 serve backend + frontend
+#   docker compose run --rm verify            one-shot tests + build + smoke
+#
+# Host ports and health-check parameters are configurable via environment
+# (see .env.example): BACKEND_HOST_PORT, FRONTEND_HOST_PORT,
+# HEALTHCHECK_INTERVAL, HEALTHCHECK_TIMEOUT, HEALTHCHECK_RETRIES,
+# HEALTHCHECK_START_PERIOD.
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: fp-bus-backend:latest
+    environment:
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:${FRONTEND_HOST_PORT:-8080}}
+    ports:
+      - "${BACKEND_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import json,urllib.request,sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2))['status']=='ok' else 1)"
+      interval: ${HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${HEALTHCHECK_TIMEOUT:-3s}
+      retries: ${HEALTHCHECK_RETRIES:-5}
+      start_period: ${HEALTHCHECK_START_PERIOD:-5s}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    image: fp-bus-frontend:latest
+    ports:
+      - "${FRONTEND_HOST_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: ${HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${HEALTHCHECK_TIMEOUT:-3s}
+      retries: ${HEALTHCHECK_RETRIES:-5}
+      start_period: ${HEALTHCHECK_START_PERIOD:-5s}
+    restart: unless-stopped
+
+  # One-shot verification job: code tests -> frontend build check -> live API
+  # smoke against the healthy stack, then exits; the container exit code is
+  # the overall result (0 = all checks passed). It lives behind a profile so
+  # plain `docker compose up` only serves the app; run it explicitly with
+  # `docker compose run --rm verify` (the name auto-activates the profile).
+  verify:
+    profiles: ["verify"]
+    build:
+      context: ./verify
+    image: fp-bus-verify:latest
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    environment:
+      BACKEND_URL: http://backend:8000
+      FRONTEND_URL: http://frontend:80
+    volumes:
+      - ./:/workspace
+      # Protect dependency dirs from any host-built binaries/venvs.
+      - /workspace/frontend/node_modules
+      - /workspace/backend/.venv
+    restart: "no"
